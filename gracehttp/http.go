@@ -22,19 +22,6 @@ var (
 	errNoStartedListeners = errors.New("no started listeners")
 )
 
-// Wrap the handler and disable keep-alive when the listener is closed
-type handler struct {
-	http.Handler
-	listener grace.ClosingListener
-}
-
-func (h *handler) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	h.Handler.ServeHTTP(res, req)
-	if h.listener.Closed() {
-		res.Header().Set("Connection", "close")
-	}
-}
-
 // An App contains one or more servers and associated configuration.
 type App struct {
 	Servers   []*http.Server
@@ -87,8 +74,11 @@ func (a *App) Serve() {
 		go func(i int, l net.Listener) {
 			server := a.Servers[i]
 
-			// Wrap the handler to disable keep-alive when closed
-			server.Handler = &handler{server.Handler, l.(grace.ClosingListener)}
+			// Disable server keep-alive when listener closed
+			go func() {
+				<-l.(grace.ClosingListener).ClosingCh()
+				server.SetKeepAlivesEnabled(false)
+			}()
 
 			// Wrap the listener for TLS support if necessary.
 			if server.TLSConfig != nil {

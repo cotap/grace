@@ -56,13 +56,14 @@ type Listener interface {
 type ClosingListener interface {
 	Listener
 
-	// Whether the listener has been closed
-	Closed() bool
+	ClosingCh() chan bool
+	IsClosed() bool
 }
 
 type listener struct {
 	Listener
 	closed      bool
+	closingCh   chan bool
 	closedMutex sync.RWMutex
 	wg          sync.WaitGroup
 }
@@ -86,13 +87,15 @@ func (c *conn) Close() error {
 // NewListener wraps an existing File listener to provide a graceful Close()
 // process.
 func NewListener(l Listener) Listener {
-	return &listener{Listener: l}
+	return &listener{Listener: l, closingCh: make(chan bool, 1)}
 }
 
 func (l *listener) Close() error {
 	l.closedMutex.Lock()
 	l.closed = true
 	l.closedMutex.Unlock()
+
+	l.closingCh <- true
 
 	var err error
 	// Init provided sockets dont actually close so we trigger Accept to return
@@ -106,11 +109,16 @@ func (l *listener) Close() error {
 	} else {
 		err = l.Listener.Close()
 	}
+
 	l.wg.Wait()
 	return err
 }
 
-func (l *listener) Closed() bool {
+func (l *listener) ClosingCh() chan bool {
+	return l.closingCh
+}
+
+func (l *listener) IsClosed() bool {
 	l.closedMutex.RLock()
 	defer l.closedMutex.RUnlock()
 	return l.closed
@@ -130,7 +138,7 @@ func (l *listener) Accept() (net.Conn, error) {
 		}
 	}()
 
-	if l.Closed() {
+	if l.IsClosed() {
 		return nil, ErrAlreadyClosed
 	}
 
@@ -144,7 +152,7 @@ func (l *listener) Accept() (net.Conn, error) {
 		// to handoff to a child as part of our restart process. In this scenario
 		// we want to treat the timeout the same as a Close.
 		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-			if l.Closed() {
+			if l.IsClosed() {
 				return nil, ErrAlreadyClosed
 			}
 		}
